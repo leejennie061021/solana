@@ -1,52 +1,139 @@
-use anchor_lang::prelude::*;
-use anchor_lang::system_program::{create_account, CreateAccount};
 
-declare_id!("ARVNCsYKDQsCLHbwUTJLpFXVrJdjhWZStyzvxmKe2xHi");
+import * as anchor from "@coral-xyz/anchor";
+import { PublicKey, SystemProgram } from "@solana/web3.js";
+import {
+  createMint,
+  getOrCreateAssociatedTokenAccount,
+  getAssociatedTokenAddress,
+  mintTo,
+  getAccount,
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
 
-#[program]
-pub mod create_system_account {
-    use super::*;
+const program = pg.program;
+const connection = pg.connection;
+const payer = pg.wallet.keypair;
+const user = payer.publicKey;
 
-    pub fn create_system_account(ctx: Context<CreateSystemAccount>, address_data: AddressData) -> Result<()> {
-        msg!("Program invoked. Creating a system account...");
-        msg!("  New public key will be: {}", &ctx.accounts.new_account.key().to_string());
+const DECIMALS = 6;
+const UNIT = 1_000_000;
 
-        // Determine the necessary minimum rent by calculating the account's size
-        let account_span = anchor_lang::prelude::borsh::to_vec(&address_data)?.len();
-        let lamports_required = (Rent::get()?).minimum_balance(account_span);
+// Create test SPL token
+const depositMint = await createMint(
+  connection,
+  payer,
+  user,
+  null,
+  DECIMALS
+);
 
-        msg!("Account span: {}", &account_span);
-        msg!("Lamports required: {}", &lamports_required);
+// Create user token account
+const userToken = await getOrCreateAssociatedTokenAccount(
+  connection,
+  payer,
+  depositMint,
+  user
+);
 
-        create_account(
-            CpiContext::new(
-                ctx.accounts.system_program.key(),
-                CreateAccount {
-                    from: ctx.accounts.payer.to_account_info(),     // From pubkey
-                    to: ctx.accounts.new_account.to_account_info(), // To pubkey
-                },
-            ),
-            lamports_required,                  // Lamports
-            account_span as u64,                // Space
-            &ctx.accounts.system_program.key(), // Owner Program
-        )?;
+// Give user 20 test tokens
+await mintTo(
+  connection,
+  payer,
+  depositMint,
+  userToken.address,
+  payer,
+  20 * UNIT
+);
 
-        msg!("Account created succesfully.");
-        Ok(())
-    }
-}
+// Derive program addresses
+const [vaultState] = PublicKey.findProgramAddressSync(
+  [Buffer.from("vault"), depositMint.toBuffer()],
+  program.programId
+);
 
-#[derive(AnchorSerialize, AnchorDeserialize, Debug)]
-pub struct AddressData {
-    name: String,
-    address: String,
-}
+const [shareMint] = PublicKey.findProgramAddressSync(
+  [Buffer.from("share_mint"), depositMint.toBuffer()],
+  program.programId
+);
 
-#[derive(Accounts)]
-pub struct CreateSystemAccount<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    #[account(mut)]
-    pub new_account: Signer<'info>,
-    pub system_program: Program<'info, System>,
-}
+const vaultTokens = await getAssociatedTokenAddress(
+  depositMint,
+  vaultState,
+  true
+);
+
+const userShares = await getAssociatedTokenAddress(
+  shareMint,
+  user
+);
+
+// Initialize vault
+await program.methods
+  .initialize()
+  .accounts({
+    user,
+    depositMint,
+    vaultState,
+    shareMint,
+    vaultTokens,
+    tokenProgram: TOKEN_PROGRAM_ID,
+    associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+    systemProgram: SystemProgram.programId,
+  })
+  .rpc();
+
+console.log("Vault initialized!");
+
+// Deposit 10 tokens
+const tx = await program.methods
+  .deposit(new anchor.BN(10 * UNIT))
+  .accounts({
+    user,
+    depositMint,
+    vaultState,
+    shareMint,
+    userTokens: userToken.address,
+    vaultTokens,
+    userShares,
+    tokenProgram: TOKEN_PROGRAM_ID,
+    associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+    systemProgram: SystemProgram.programId,
+  })
+  .rpc();
+
+// Check balances
+const userBalance = await getAccount(
+  connection,
+  userToken.address
+);
+
+const vaultBalance = await getAccount(
+  connection,
+  vaultTokens
+);
+
+const shareBalance = await getAccount(
+  connection,
+  userShares
+);
+
+console.log("Deposit transaction:", tx);
+console.log(
+  "User tokens:",
+  Number(userBalance.amount) / UNIT
+);
+console.log(
+  "Vault tokens:",
+  Number(vaultBalance.amount) / UNIT
+);
+console.log(
+  "Share tokens:",
+  Number(shareBalance.amount) / UNIT
+);
+
+console.log(
+  "Explorer: https://explorer.solana.com/tx/" +
+  tx +
+  "?cluster=devnet"
+);
